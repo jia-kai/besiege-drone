@@ -1,4 +1,7 @@
 # use raw socket because there are few standard libs in LenchScripterMod
+
+from actiondef import Action, KEYS
+
 import socket
 import marshal
 
@@ -28,11 +31,11 @@ class RPCProxy:
     def close(self):
         self._conn.close()
 
-    def step(self, position, angle):
+    def step(self, position, angle, command):
         # send current state
         Besiege.Watch('position', fmt_numlist(position))
         Besiege.Watch('angle', fmt_numlist(angle))
-        data = marshal.dumps([position, angle, Time.deltaTime])
+        data = marshal.dumps([position, angle, command, Time.deltaTime])
         dlen = '{:32}'.format(len(data))
         self._conn.sendall(dlen + data)
 
@@ -58,7 +61,17 @@ controller_proxy = RPCProxy()
 clr.drone_controller_proxy = controller_proxy
 
 def Update():
+    command = 0
+    actions = []
+    for key, (name, val)  in zip(KEYS, Action._all_actions()):
+        if Input.GetKey(getattr(KeyCode, key)):
+            actions.append(name)
+            command |= val
+
+    Besiege.Watch('action', ' '.join(actions))
+
     controller_proxy.step(
         list(map(float, center.Position)),
         list(map(float, center.EulerAngles)),
+        command
     )

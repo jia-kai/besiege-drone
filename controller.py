@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+from actiondef import Action
+
 import socketserver
 import marshal
 import socket
@@ -9,6 +11,11 @@ import numpy as np
 
 HOST = 'localhost'
 PORT = 2743
+
+def rot_by_angle(vec, ref, angle):
+    """Rotate *vec* by *angle* radians on the plan perpendicular to *ref*"""
+    ax = np.cross(ref, vec)
+    return np.cos(angle) * vec + np.sin(angle) * ax
 
 class State:
     """current flying state
@@ -54,6 +61,9 @@ class State:
 
     yaw_speed = None
 
+    command = None
+    """current user command: OR of actions"""
+
     STARTING_TOP = np.array([0, 1, 0], dtype=np.float)
     STARTING_FRONT = np.array([0, 0, -1], dtype=np.float)
     STARTING_RIGHT = np.array([1, 0, 0], dtype=np.float)
@@ -61,7 +71,8 @@ class State:
     def __init__(self):
         self.engine_speed = np.ones((2, 2))
 
-    def update(self, position, angle, time_delta):
+    def update(self, position, angle, command, time_delta):
+        self.command = command
         if time_delta == 0:
             return False
         self.position = np.array(position, dtype=np.float)
@@ -164,9 +175,35 @@ class GestureController:
         self.target_top_dir = np.array([0, 1, 0], dtype=np.float)
 
     def step(self):
+        self._setup_target()
         self._adjust_altitude()
         self._adjust_top_dir()
         self._adjust_yaw()
+
+    def _setup_target(self):
+        cmd = self._state.command
+
+        pitch = 0
+        if cmd & Action.GO_FRONT:
+            pitch += np.deg2rad(10)
+        if cmd & Action.GO_BACK:
+            pitch -= np.deg2rad(10)
+        self.target_top_dir = rot_by_angle(
+            State.STARTING_TOP,
+            np.cross(State.STARTING_TOP, self._state.front_dir),
+            pitch)
+
+        self.target_yaw_speed = 0
+        if cmd & Action.YAW_LEFT:
+            self.target_yaw_speed += np.deg2rad(45)
+        if cmd & Action.YAW_RIGHT:
+            self.target_yaw_speed -= np.deg2rad(45)
+
+        self.target_altitude_speed = 0
+        if cmd & Action.HIGHER:
+            self.target_altitude_speed += 30
+        if cmd & Action.LOWER:
+            self.target_altitude_speed -= 10
 
     def _adjust_altitude(self):
         s = self._state
