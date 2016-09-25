@@ -6,6 +6,7 @@ from actiondef import Action
 import socketserver
 import marshal
 import socket
+from abc import ABCMeta, abstractmethod, abstractproperty
 
 import numpy as np
 
@@ -16,6 +17,15 @@ def rot_by_angle(vec, ref, angle):
     """Rotate *vec* by *angle* radians on the plan perpendicular to *ref*"""
     ax = np.cross(ref, vec)
     return np.cos(angle) * vec + np.sin(angle) * ax
+
+def norm_angle_diff(v):
+    if abs(v) > np.pi:
+        if v > 0:
+            v -= np.pi * 2
+        else:
+            v += np.pi * 2
+        assert abs(v) <= np.pi
+    return v
 
 class State:
     """current flying state
@@ -89,14 +99,8 @@ class State:
         if self._prev_position is not None:
             self.position_speed = (
                 (self.position - self._prev_position) / time_delta)
-            dyaw = self.yaw - self._prev_yaw
-            if abs(dyaw) > np.pi:
-                if dyaw > 0:
-                    dyaw -= np.pi * 2
-                else:
-                    dyaw += np.pi * 2
-                assert abs(dyaw) <= np.pi
-            self.yaw_speed = dyaw / time_delta
+            self.yaw_speed = (
+                norm_angle_diff(self.yaw - self._prev_yaw) / time_delta)
             ret = True
         else:
             ret = False
@@ -159,12 +163,142 @@ class PIDController:
         return (err * self._kp + ti + td) * self._scale
 
 
+class HoverStabilizerBase(metaclass=ABCMeta):
+    IDLE_TIME_THRESH = 1
+    """use value after no user command for this period as target hover state"""
+
+    _idle_time = 0
+
+    _target_state = None
+
+    @abstractproperty
+    def USER_COMMAND_MASK(self):
+        """mask for related user command"""
+
+    @abstractproperty
+    def _state(self):
+        """global state object
+
+        :type: :class:`State`
+        """
+
+    @abstractproperty
+    def _pid(self):
+        """the pid controller"""
+
+    @abstractmethod
+    def get_state(self):
+        """get current state for the signal to be controlled"""
+
+    @abstractmethod
+    def _apply_action(self, action):
+        """apply action from PID controller"""
+
+    def step(self):
+        if self._state.command & self.USER_COMMAND_MASK:
+            self._idle_time = 0
+            return
+        prev_idle_time = self._idle_time
+        self._idle_time += self._state.time_delta
+        if prev_idle_time < self.IDLE_TIME_THRESH:
+            if self._idle_time >= self.IDLE_TIME_THRESH:
+                # first time to cross IDLE_TIME_THRESH, so use current state as
+                # target state
+                self._target_state = self.get_state()
+                print('{}: target={}'.format(type(self).__name__,
+                                             self._target_state))
+            return
+
+        self._apply_action(self._pid(
+            self._err(self._target_state, self.get_state())))
+
+    def _err(self, target, cur):
+        return target - cur
+
+
+class PIDOnGestureHoverStabilizer(HoverStabilizerBase):
+    @abstractproperty
+    def _pid_args(self):
+        pass
+
+    _state = None
+    _pid = None
+
+    def __init__(self, state, gesture_controller):
+        assert isinstance(state, State)
+        assert isinstance(gesture_controller, GestureController)
+        self._state = state
+        self._gesture_controller = gesture_controller
+        self._pid = PIDController(state, *self._pid_args)
+
+
+class AltitudeHoverStabilizer(PIDOnGestureHoverStabilizer):
+    IDLE_TIME_THRESH = 0.5
+    _pid_args = (2.5, )
+    USER_COMMAND_MASK = Action.HIGHER | Action.LOWER
+
+    def get_state(self):
+        return self._state.position[1]
+
+    def _apply_action(self, action):
+        self._gesture_controller.target_altitude_speed = action
+
+
+class YawHoverStabilizer(PIDOnGestureHoverStabilizer):
+    _pid_args = (2.5, )
+    USER_COMMAND_MASK = Action.YAW_LEFT | Action.YAW_RIGHT
+
+    def get_state(self):
+        return self._state.yaw
+
+    def _apply_action(self, action):
+        self._gesture_controller.target_yaw_speed = action
+
+    def _err(self, target, cur):
+        return norm_angle_diff(target - cur)
+
+
+class PositionHoverStabilizer(PIDOnGestureHoverStabilizer):
+    IDLE_TIME_THRESH = 3
+    _pid_args = (1, 0, 1, 0.01)
+
+    USER_COMMAND_MASK = Action.GO_FRONT | Action.GO_BACK
+
+    def get_state(self):
+        return self._state.position[[0, 2]]
+
+    def _apply_action(self, action):
+        self._gesture_controller.target_top_dir = action
+
+
 class GestureController:
     """controls yaw, pitch, roll_speed and altitude"""
 
     target_altitude_speed = 0
-    target_top_dir = None
+    _target_top_dir = None
     target_yaw_speed = 0
+
+    MAX_TOP_ANGLE_DEG = 10
+    _MAX_TOP_ANGLE_TAN = np.tan(np.deg2rad(MAX_TOP_ANGLE_DEG))
+
+    SPEED_LIMIT = 10
+
+    @property
+    def target_top_dir(self):
+        return self._target_top_dir
+
+    @target_top_dir.setter
+    def target_top_dir(self, v):
+        v = np.array(v, dtype=np.float)
+        if v.size == 2:
+            mag = np.linalg.norm(v)
+            if mag > self._MAX_TOP_ANGLE_TAN:
+                v *= self._MAX_TOP_ANGLE_TAN / mag
+            dx, dz = v
+            v = np.array([dx, 1, dz], dtype=np.float)
+        assert v.shape == (3, )
+        v /= np.linalg.norm(v)
+        self._target_top_dir = v
 
     def __init__(self, state):
         assert isinstance(state, State)
@@ -172,15 +306,14 @@ class GestureController:
         self._pid_altitude = PIDController(state, 1, 0, 1, scale=1e-3)
         self._pid_top = PIDController(state, 1, 0, 1, scale=1e-2)
         self._pid_yaw = PIDController(state, 1, 0, 1, scale=1e-2)
-        self.target_top_dir = np.array([0, 1, 0], dtype=np.float)
+        self._target_top_dir = np.array([0, 1, 0], dtype=np.float)
 
     def step(self):
-        self._setup_target()
         self._adjust_altitude()
         self._adjust_top_dir()
         self._adjust_yaw()
 
-    def _setup_target(self):
+    def setup_target(self):
         cmd = self._state.command
 
         pitch = 0
@@ -188,6 +321,9 @@ class GestureController:
             pitch += np.deg2rad(10)
         if cmd & Action.GO_BACK:
             pitch -= np.deg2rad(10)
+        speed = np.linalg.norm(self._state.position_speed[[0, 2]])
+        if speed >= self.SPEED_LIMIT:
+            pitch *= (self.SPEED_LIMIT * 2 - speed) / self.SPEED_LIMIT
         self.target_top_dir = rot_by_angle(
             State.STARTING_TOP,
             np.cross(State.STARTING_TOP, self._state.front_dir),
@@ -245,9 +381,18 @@ class System:
     def __init__(self):
         self._state = State()
         self.gesture = GestureController(self._state)
+        self._stabilizers = [
+            i(self._state, self.gesture) for i in [
+                AltitudeHoverStabilizer,
+                YawHoverStabilizer,
+                PositionHoverStabilizer
+            ]]
 
     def step(self, *args):
         if self._state.update(*args):
+            self.gesture.setup_target()
+            for i in self._stabilizers:
+                i.step()
             self.gesture.step()
         self._state.clip()
         return list(map(float, self._state.engine_speed.flatten()))

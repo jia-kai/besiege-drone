@@ -68,7 +68,7 @@ def Update():
             actions.append(name)
             command |= val
 
-    Besiege.Watch('action', ' '.join(actions))
+    Besiege.Watch('command', ' '.join(actions))
 
     controller_proxy.step(
         list(map(float, center.Position)),
