@@ -15,7 +15,7 @@ class State:
 
     Note: Besiege applies a left-hand coordinate system:
         euler angle order: z, x, y
-        euler angle direction: x:(z->y) y:(z->x) z:(y->x)
+        euler angle direction: x:(y->z) y:(z->x) z:(x->y)
 
     We use a right-hand world coordinate
     """
@@ -47,6 +47,13 @@ class State:
     right_dir = None
     """unit-vector right direction"""
 
+    yaw = None
+    """yaw angle in radians"""
+
+    _prev_yaw = None
+
+    yaw_speed = None
+
     STARTING_TOP = np.array([0, 1, 0], dtype=np.float)
     STARTING_FRONT = np.array([0, 0, -1], dtype=np.float)
     STARTING_RIGHT = np.array([1, 0, 0], dtype=np.float)
@@ -66,34 +73,52 @@ class State:
         angle.shape == (3, )
         assert isinstance(time_delta, float)
 
+        self._init_dir(angle)
+
         if self._prev_position is not None:
             self.position_speed = (
                 (self.position - self._prev_position) / time_delta)
+            dyaw = self.yaw - self._prev_yaw
+            if abs(dyaw) > np.pi:
+                if dyaw > 0:
+                    dyaw -= np.pi * 2
+                else:
+                    dyaw += np.pi * 2
+                assert abs(dyaw) <= np.pi
+            self.yaw_speed = dyaw / time_delta
+            ret = True
+        else:
+            ret = False
         self._prev_position = self.position
-        self._init_dir(angle)
-        return True
+        self._prev_yaw = self.yaw
+        return ret
 
     def clip(self):
         np.clip(self.engine_speed, 0.1, 1.9, self.engine_speed)
 
     def _init_dir(self, angles):
-        def mkrot(axis, angle):
+        def mkrot(axis, angle, swap=False):
             c = np.cos
             s = np.sin
             mat = np.array(
-                [[c(angle), s(angle)],
-                 [-s(angle), c(angle)]]
+                [[c(angle), -s(angle)],
+                 [s(angle), c(angle)]]
             )
             ret = np.zeros((3, 3))
             a, b = [i for i in range(3) if i != axis]
-            ret[[a, a, b, b], [a, b, a, b]] = mat.flatten()
+            mf = mat.flatten()
+            if swap:
+                mf = mf[::-1]
+            ret[[a, a, b, b], [a, b, a, b]] = mf
             ret[axis, axis] = 1
             return ret
         rx, ry, rz = angles
-        rot = mkrot(1, ry).dot(mkrot(0, rx)).dot(mkrot(2, -rz))
+        rot = mkrot(1, -ry, True).dot(mkrot(0, rx, True)).dot(mkrot(2, rz))
         self.top_dir = rot.dot(self.STARTING_TOP)
         self.front_dir = rot.dot(self.STARTING_FRONT)
         self.right_dir = rot.dot(self.STARTING_RIGHT)
+        x, y, z = self.front_dir
+        self.yaw = np.arctan2(x, z)
 
 
 class PIDController:
@@ -128,22 +153,25 @@ class GestureController:
 
     target_altitude_speed = 0
     target_top_dir = None
+    target_yaw_speed = 0
 
     def __init__(self, state):
         assert isinstance(state, State)
         self._state = state
         self._pid_altitude = PIDController(state, 1, 0, 1, scale=1e-3)
         self._pid_top = PIDController(state, 1, 0, 1, scale=1e-2)
+        self._pid_yaw = PIDController(state, 1, 0, 1, scale=1e-2)
         self.target_top_dir = np.array([0, 1, 0], dtype=np.float)
 
     def step(self):
-        s = self._state
-        if s.position_speed is None:
-            return
+        self._adjust_altitude()
+        self._adjust_top_dir()
+        self._adjust_yaw()
 
+    def _adjust_altitude(self):
+        s = self._state
         s.engine_speed += self._pid_altitude(
             self.target_altitude_speed - s.position_speed[1])
-        self._adjust_top_dir()
 
     def _adjust_top_dir(self):
         """adjust top_dir towards target_top_dir"""
@@ -166,6 +194,12 @@ class GestureController:
         pdist[1] = -b, -a
         delta = self._pid_top(pdist)
         s.engine_speed += delta
+
+    def _adjust_yaw(self):
+        s = self._state
+        a = self._pid_yaw(self.target_yaw_speed - s.yaw_speed)
+        s.engine_speed += [[-a, a],
+                           [a, -a]]
 
 
 class System:
@@ -196,8 +230,10 @@ class RPCHandler(socketserver.BaseRequestHandler):
             self.request.sendall(
                 (';'.join(map(str, ret)) + '@').encode('ascii'))
 
+
 class RPCHandlerServer(socketserver.TCPServer):
     allow_reuse_address = True
+
 
 def main():
     server = RPCHandlerServer((HOST, PORT), RPCHandler)
