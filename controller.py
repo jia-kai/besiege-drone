@@ -13,6 +13,8 @@ import numpy as np
 HOST = 'localhost'
 PORT = 2743
 
+ENGINE_SPEED_RANGE = (0.5, 5)
+
 def rot_by_angle(vec, ref, angle):
     """Rotate *vec* by *angle* radians on the plan perpendicular to *ref*"""
     ax = np.cross(ref, vec)
@@ -107,9 +109,6 @@ class State:
         self._prev_position = self.position
         self._prev_yaw = self.yaw
         return ret
-
-    def clip(self):
-        np.clip(self.engine_speed, 1, 5, self.engine_speed)
 
     def _init_dir(self, angles):
         def mkrot(axis, angle, swap=False):
@@ -243,7 +242,7 @@ class AltitudeHoverStabilizer(PIDOnGestureHoverStabilizer):
 
 
 class YawHoverStabilizer(PIDOnGestureHoverStabilizer):
-    _pid_args = (2.5, )
+    _pid_args = (2, 0, 0.8)
     USER_COMMAND_MASK = Action.YAW_LEFT | Action.YAW_RIGHT
 
     def get_state(self):
@@ -253,7 +252,16 @@ class YawHoverStabilizer(PIDOnGestureHoverStabilizer):
         self._gesture_controller.target_yaw_speed = action
 
     def _err(self, target, cur):
-        return norm_angle_diff(target - cur)
+        err = norm_angle_diff(target - cur)
+        speed = self._state.yaw_speed
+        if (abs(speed) > 0.2 and (speed > 0) != (err > 0) and
+                abs(err - speed * 0.2) > np.pi):
+            # continue current direction is better than change direction
+            if speed > 0:
+                err += np.pi * 2
+            else:
+                err -= np.pi * 2
+        return err
 
 
 class PositionHoverStabilizer(PIDOnGestureHoverStabilizer):
@@ -272,14 +280,14 @@ class PositionHoverStabilizer(PIDOnGestureHoverStabilizer):
 class GestureController:
     """controls yaw, pitch, roll_speed and altitude"""
 
-    target_altitude_speed = 0
+    _target_altitude_speed = 0
     _target_top_dir = None
-    target_yaw_speed = 0
+    _target_yaw_speed = 0
 
     MAX_TOP_ANGLE_DEG = 10
     _MAX_TOP_ANGLE_TAN = np.tan(np.deg2rad(MAX_TOP_ANGLE_DEG))
 
-    SPEED_LIMIT = 10
+    SPEED_LIMIT_MOVE = 10
 
     @property
     def target_top_dir(self):
@@ -298,6 +306,23 @@ class GestureController:
         v /= np.linalg.norm(v)
         self._target_top_dir = v
 
+    @property
+    def target_yaw_speed(self):
+        return self._target_yaw_speed
+
+    @target_yaw_speed.setter
+    def target_yaw_speed(self, v):
+        lim = np.deg2rad(60)
+        self._target_yaw_speed = np.clip(v, -lim, lim)
+
+    @property
+    def target_altitude_speed(self):
+        return self._target_altitude_speed
+
+    @target_altitude_speed.setter
+    def target_altitude_speed(self, v):
+        self._target_altitude_speed = np.clip(v, -30, 30)
+
     def __init__(self, state):
         assert isinstance(state, State)
         self._state = state
@@ -307,9 +332,9 @@ class GestureController:
         self._target_top_dir = np.array([0, 1, 0], dtype=np.float)
 
     def step(self):
-        self._adjust_altitude()
         self._adjust_top_dir()
         self._adjust_yaw()
+        self._adjust_altitude()
 
     def setup_target(self):
         cmd = self._state.command
@@ -320,8 +345,9 @@ class GestureController:
         if cmd & Action.GO_BACK:
             pitch -= np.deg2rad(10)
         speed = np.linalg.norm(self._state.position_speed[[0, 2]])
-        if speed >= self.SPEED_LIMIT:
-            pitch *= (self.SPEED_LIMIT * 2 - speed) / self.SPEED_LIMIT
+        if speed >= self.SPEED_LIMIT_MOVE:
+            pitch *= (
+                (self.SPEED_LIMIT_MOVE * 2 - speed) / self.SPEED_LIMIT_MOVE)
         self.target_top_dir = rot_by_angle(
             State.STARTING_TOP,
             np.cross(State.STARTING_TOP, self._state.front_dir),
@@ -339,10 +365,26 @@ class GestureController:
         if cmd & Action.LOWER:
             self.target_altitude_speed -= 10
 
+    @classmethod
+    def _clip_speed_delta(cls, base, delta):
+        """clip delta so base + delta would be in range of
+        ENGINE_SPEED_RANGE"""
+        if delta > 0:
+            return min(ENGINE_SPEED_RANGE[1] - base, delta)
+        return max(ENGINE_SPEED_RANGE[0] - base, delta)
+
     def _adjust_altitude(self):
         s = self._state
-        s.engine_speed += self._pid_altitude(
-            self.target_altitude_speed - s.position_speed[1])
+        delta = float(self._pid_altitude(
+            self.target_altitude_speed - s.position_speed[1]))
+        s.engine_speed += delta
+        if delta > 0:
+            s.engine_speed -= max(
+                s.engine_speed.max() - ENGINE_SPEED_RANGE[1], 0)
+        else:
+            s.engine_speed -= min(
+                s.engine_speed.min() - ENGINE_SPEED_RANGE[0], 0)
+
 
     def _adjust_top_dir(self):
         """adjust top_dir towards target_top_dir"""
@@ -358,17 +400,34 @@ class GestureController:
         # ---+--- (x+, right)
         # -b | -a
         # so that total torque is (x, y)
-        a = y - x
-        b = y + x
-        pdist = np.empty((2, 2), dtype=np.float)
-        pdist[0] = a, b
-        pdist[1] = -b, -a
-        delta = self._pid_top(pdist)
-        s.engine_speed += delta
+        a, b = self._pid_top(np.array([y - x, y + x], dtype=np.float))
+        scale = 1
+        def update_scale(v, p1):
+            nonlocal scale
+            if abs(v) > 1e-3:
+                clip = self._clip_speed_delta(s.engine_speed[0, p1], v)
+                clip_m = self._clip_speed_delta(s.engine_speed[1, p1 ^ 1], -v)
+                scale = min(scale, clip / v, clip_m / -v)
+        update_scale(a, 0)
+        update_scale(b, 1)
+
+        assert scale >= 0
+        a *= scale
+        b *= scale
+        s.engine_speed += [[a, b],
+                           [-b, -a]]
 
     def _adjust_yaw(self):
         s = self._state
         a = self._pid_yaw(self.target_yaw_speed - s.yaw_speed)
+        if abs(a) >= 1e-3:
+            p = s.engine_speed
+            ac = self._clip_speed_delta(p[0, 1], a)
+            ac = self._clip_speed_delta(p[1, 0], ac)
+            acm = self._clip_speed_delta(p[0, 0], -a)
+            acm = self._clip_speed_delta(p[1, 1], acm)
+            a *= min(ac / a, acm / -a)
+
         s.engine_speed += [[-a, a],
                            [a, -a]]
 
@@ -392,7 +451,6 @@ class System:
             for i in self._stabilizers:
                 i.step()
             self.gesture.step()
-        self._state.clip()
         return list(map(float, self._state.engine_speed.flatten()))
 
 
