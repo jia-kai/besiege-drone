@@ -109,7 +109,7 @@ class State:
         return ret
 
     def clip(self):
-        np.clip(self.engine_speed, 0.1, 1.9, self.engine_speed)
+        np.clip(self.engine_speed, 1, 5, self.engine_speed)
 
     def _init_dir(self, angles):
         def mkrot(axis, angle, swap=False):
@@ -164,8 +164,7 @@ class PIDController:
 
 
 class HoverStabilizerBase(metaclass=ABCMeta):
-    IDLE_TIME_THRESH = 1
-    """use value after no user command for this period as target hover state"""
+    TIME_AVG_DECAY_EXP = -2
 
     _idle_time = 0
 
@@ -200,15 +199,15 @@ class HoverStabilizerBase(metaclass=ABCMeta):
             return
         prev_idle_time = self._idle_time
         self._idle_time += self._state.time_delta
-        if prev_idle_time < self.IDLE_TIME_THRESH:
-            if self._idle_time >= self.IDLE_TIME_THRESH:
-                # first time to cross IDLE_TIME_THRESH, so use current state as
-                # target state
-                self._target_state = self.get_state()
-                print('{}: target={}'.format(type(self).__name__,
-                                             self._target_state))
+        if prev_idle_time == 0:
+            self._target_state = self.get_state()
             return
 
+        prev_state = self._target_state
+        cur_state = self.get_state()
+        w = np.exp(self.TIME_AVG_DECAY_EXP * self._idle_time)
+        if w > 1e-4:
+            self._target_state = (1 - w) * prev_state + w * cur_state
         self._apply_action(self._pid(
             self._err(self._target_state, self.get_state())))
 
@@ -233,7 +232,6 @@ class PIDOnGestureHoverStabilizer(HoverStabilizerBase):
 
 
 class AltitudeHoverStabilizer(PIDOnGestureHoverStabilizer):
-    IDLE_TIME_THRESH = 0.5
     _pid_args = (2.5, )
     USER_COMMAND_MASK = Action.HIGHER | Action.LOWER
 
@@ -259,7 +257,7 @@ class YawHoverStabilizer(PIDOnGestureHoverStabilizer):
 
 
 class PositionHoverStabilizer(PIDOnGestureHoverStabilizer):
-    IDLE_TIME_THRESH = 3
+    TIME_AVG_DECAY_EXP = -3
     _pid_args = (1, 0, 1, 0.01)
 
     USER_COMMAND_MASK = Action.GO_FRONT | Action.GO_BACK
