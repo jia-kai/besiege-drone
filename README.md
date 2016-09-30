@@ -2,7 +2,7 @@
 
 A drone in Besiege which can clear almost all the levels.
 
-[![argus-demo](https://j.gifs.com/xkDM2q.gif)](https://youtu.be/fyW_sBMxHPQ)
+[![argus-demo](https://j.gifs.com/2k5ZYv.gif)](https://youtu.be/fyW_sBMxHPQ)
 
 ## Usage
 
