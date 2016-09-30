@@ -76,18 +76,26 @@ class State:
     command = None
     """current user command: OR of actions"""
 
+    goto_target = None
+    """coordinate that the user wants to go to; can be None"""
+
     STARTING_TOP = np.array([0, 1, 0], dtype=np.float)
     STARTING_FRONT = np.array([np.sqrt(2)/2, 0, -np.sqrt(2)/2], dtype=np.float)
 
     def __init__(self):
         self.engine_speed = np.ones((2, 2))
 
-    def update(self, position, angle, command, time_delta):
+    def update(self, position, angle, command, goto_target, time_delta):
         self.command = command
         if time_delta == 0:
             return False
         self.position = np.array(position, dtype=np.float)
         self.position[2] *= -1
+        if goto_target is not None:
+            self.goto_target = np.array(goto_target, dtype=np.float)
+            self.goto_target[2] *= -1
+        else:
+            self.goto_target = None
         angle = np.array(angle, dtype=np.float)
         self.time_delta = time_delta
 
@@ -167,6 +175,8 @@ class HoverStabilizerBase(metaclass=ABCMeta):
 
     _target_state = None
 
+    _force_cur_state_as_target = False
+
     @abstractproperty
     def USER_COMMAND_MASK(self):
         """mask for related user command"""
@@ -193,21 +203,32 @@ class HoverStabilizerBase(metaclass=ABCMeta):
     def _merge_states(self, w, s0, s1):
         return (1 - w) * s0 + w * s1
 
+    def force_target_state(self, state):
+        """set given state as the target state of this stabilizer; target state
+        would not be automatically updated unless user command is available"""
+        self._force_cur_state_as_target = True
+        self._target_state = state
+
     def step(self):
         if self._state.command & self.USER_COMMAND_MASK:
+            self._force_cur_state_as_target = False
             self._idle_time = 0
             return
-        prev_idle_time = self._idle_time
-        self._idle_time += self._state.time_delta
-        if prev_idle_time == 0:
-            self._target_state = self.get_state()
-            return
 
-        prev_state = self._target_state
-        cur_state = self.get_state()
-        w = np.exp(self.TIME_AVG_DECAY_EXP * self._idle_time)
-        if w > 1e-4:
-            self._target_state = self._merge_states(w, prev_state, cur_state)
+        if not self._force_cur_state_as_target:
+            prev_idle_time = self._idle_time
+            self._idle_time += self._state.time_delta
+            if prev_idle_time == 0:
+                self._target_state = self.get_state()
+                return
+
+            prev_state = self._target_state
+            cur_state = self.get_state()
+            w = np.exp(self.TIME_AVG_DECAY_EXP * self._idle_time)
+            if w > 1e-4:
+                self._target_state = self._merge_states(
+                    w, prev_state, cur_state)
+
         self._apply_action(self._pid(
             self._err(self._target_state, self.get_state())))
 
@@ -289,7 +310,7 @@ class GestureController:
     _target_top_dir = None
     _target_yaw_speed = 0
 
-    MAX_TOP_ANGLE_DEG = 15
+    MAX_TOP_ANGLE_DEG = 5
     _MAX_TOP_ANGLE_TAN = np.tan(np.deg2rad(MAX_TOP_ANGLE_DEG))
 
     SPEED_LIMIT_MOVE = 12
@@ -459,6 +480,12 @@ class System:
     def step(self, *args):
         if self._state.update(*args):
             self.gesture.setup_target()
+            if self._state.goto_target is not None:
+                dst = self._state.goto_target[[0, 2]]
+                print('goto {} from {}'.format(dst,
+                                               self._state.position[[0, 2]]))
+                self._stabilizers[-1].force_target_state(dst)
+
             for i in self._stabilizers:
                 i.step()
             self.gesture.step()

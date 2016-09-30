@@ -31,11 +31,12 @@ class RPCProxy:
     def close(self):
         self._conn.close()
 
-    def step(self, position, angle, command):
+    def step(self, position, angle, command, goto_target):
         # send current state
         Besiege.Watch('position', fmt_numlist(position))
         Besiege.Watch('angle', fmt_numlist(angle))
-        data = marshal.dumps([position, angle, command, Time.deltaTime])
+        data = marshal.dumps([position, angle, command, goto_target,
+                              Time.deltaTime])
         dlen = '{:32}'.format(len(data))
         self._conn.sendall(dlen + data)
 
@@ -64,15 +65,22 @@ def Update():
     command = 0
     actions = []
     for key, (name, val)  in zip(KEYS, Action._all_actions()):
-        print(key, name, val)
         if Input.GetKey(getattr(KeyCode, key)):
             actions.append(name)
             command |= val
 
     Besiege.Watch('command', ' '.join(actions))
+    goto_target = None
+    if Input.GetKey(KeyCode.Mouse0):
+        goto_target = Besiege.GetRaycastHit()
+        Besiege.Watch('goto_target', goto_target)
+        goto_target = list(map(float, goto_target))
+    else:
+        Besiege.Watch('goto_target', 'None')
 
     controller_proxy.step(
         list(map(float, center.Position)),
         list(map(float, center.EulerAngles)),
-        command
+        command,
+        goto_target
     )
