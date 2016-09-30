@@ -64,6 +64,7 @@ def Update():
     command = 0
     actions = []
     for key, (name, val)  in zip(KEYS, Action._all_actions()):
+        print(key, name, val)
         if Input.GetKey(getattr(KeyCode, key)):
             actions.append(name)
             command |= val

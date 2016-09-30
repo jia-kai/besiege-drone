@@ -272,7 +272,8 @@ class PositionHoverStabilizer(PIDOnGestureHoverStabilizer):
     TIME_AVG_DECAY_EXP = -3
     _pid_args = (1, 0, 1, 0.01)
 
-    USER_COMMAND_MASK = Action.GO_FRONT | Action.GO_BACK
+    USER_COMMAND_MASK = (Action.GO_FRONT | Action.GO_BACK | Action.GO_LEFT |
+                         Action.GO_RIGHT)
 
     def get_state(self):
         return self._state.position[[0, 2]]
@@ -348,12 +349,18 @@ class GestureController:
             pitch += np.deg2rad(10)
         if cmd & Action.GO_BACK:
             pitch -= np.deg2rad(10)
-        speed = np.linalg.norm(self._state.position_speed[[0, 2]])
-        pitch *= 1 - speed / self.SPEED_LIMIT_MOVE
+        roll = 0
+        if cmd & Action.GO_LEFT:
+            roll -= np.deg2rad(10)
+        if cmd & Action.GO_RIGHT:
+            roll += np.deg2rad(10)
+        scale = (1 - (np.linalg.norm(self._state.position_speed[[0, 2]]) /
+                      self.SPEED_LIMIT_MOVE))
+        pitch *= scale
+        roll *= scale
         self.target_top_dir = rot_by_angle(
-            State.STARTING_TOP,
-            -self._state.right_dir,
-            pitch)
+            rot_by_angle(State.STARTING_TOP, -self._state.right_dir, pitch),
+            self._state.front_dir, roll)
 
         self.target_yaw_speed = 0
         if cmd & Action.YAW_LEFT:

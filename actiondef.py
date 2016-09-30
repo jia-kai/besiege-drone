@@ -6,6 +6,8 @@ def _next(cur=[0]):
 class Action(object):
     GO_FRONT = _next()
     GO_BACK = _next()
+    GO_LEFT = _next()
+    GO_RIGHT = _next()
     YAW_LEFT = _next()
     YAW_RIGHT = _next()
     HIGHER = _next()
@@ -18,4 +20,8 @@ class Action(object):
         ret.sort(key=lambda x: x[1])
         return ret
 
-KEYS = 'IKJLUO'
+KEYS = ['I', 'K',   # front/back
+        'Comma', 'Period',  # left/right
+        'J', 'L',   # yaw
+        'U', 'O'    # altitude
+        ]
